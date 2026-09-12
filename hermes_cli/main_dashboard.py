@@ -5,6 +5,7 @@ are imported lazily inside the functions that use them (avoids an import cycle).
 """
 
 import contextlib
+import logging
 import os
 import re
 import shlex
@@ -422,6 +423,29 @@ def _cancel(message: str = "  Cancelled.") -> NoReturn:
     sys.exit(1)
 
 
+def _ensure_dashboard_auth_provider(args) -> None:
+    """Ensure BasicAuthProvider is registered even in headless service mode.
+
+    The interactive setup (TTY) calls discover_plugins(force=True) after writing
+    config; a headless systemd/daemon run may never call it. This function
+    checks config.yaml for dashboard.basic_auth and triggers discovery if
+    needed — it's safe to call multiple times (idempotent).
+    """
+    try:
+        from hermes_cli.config import load_config
+        from hermes_cli.dashboard_auth import list_providers
+        from hermes_cli.plugins import discover_plugins
+        cfg = load_config()
+        basic = (cfg.get("dashboard") or {}).get("basic_auth") or {}
+        if not basic.get("username"):
+            return
+        if list_providers():
+            return  # already registered
+        discover_plugins(force=True)
+    except Exception as exc:
+        logging.getLogger(__name__).debug("ensure_dashboard_auth_provider failed: %s", exc)
+
+
 def _maybe_setup_dashboard_auth_interactively(args) -> None:
     """Offer to configure dashboard auth when the gate engages and no provider exists.
 
@@ -447,6 +471,8 @@ def _maybe_setup_dashboard_auth_interactively(args) -> None:
         return
 
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        # Headless: check config and register provider if present.
+        _ensure_dashboard_auth_provider(args)
         return
 
     print(f"\n⚠ Dashboard authentication is required for this configuration ({host}).")
@@ -457,7 +483,7 @@ def _maybe_setup_dashboard_auth_interactively(args) -> None:
     print()
     print("  How do you want to authenticate the dashboard?")
     print("    [1] Username & password (quickest; for a trusted LAN / VPN)")
-    print("    [2] OAuth via Nous Portal (run `hermes dashboard register`)\n    [3] Cancel\n")
+    print("    [2] OAuth via Nous Portal (run `hermes dashboard register`)\\n    [3] Cancel\\n")
 
     try:
         choice = input("  Choice [1]: ").strip() or "1"
@@ -557,9 +583,9 @@ def _read_ssh_session_token_file(path: str) -> str:
     try:
         relative = Path(path).relative_to(token_root)
     except ValueError as exc:
-        raise SystemExit("--ssh-session-token-file must be under the desktop-ssh directory") from exc
+        raise SystemExit("--ssh-session-token-file has an invalid runtime path") from exc
     if len(relative.parts) != 2 or not re.fullmatch(r"[0-9a-f]{32}", relative.parts[0]):
-        raise SystemExit("--ssh-session-token-file has an invalid runtime path")
+        raise SystemExit("--ssh-session-token-file has an invalid filename")
     if not re.fullmatch(r"[0-9a-f]{16}\.token", relative.parts[1]):
         raise SystemExit("--ssh-session-token-file has an invalid filename")
 
